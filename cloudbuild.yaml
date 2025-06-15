@@ -1,0 +1,32 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [
+      'build', '-t',
+      '$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPO/$_SERVICE_NAME:$COMMIT_SHA', '.'
+    ]
+
+  - name: gcr.io/cloud-builders/docker
+    args: [
+      'push',
+      '$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPO/$_SERVICE_NAME:$COMMIT_SHA'
+    ]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE_NAME
+      - '--image'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPO/$_SERVICE_NAME:$COMMIT_SHA'
+      - '--region'
+      - $_DEPLOY_REGION
+      - '--set-env-vars'
+      - 'FLASK_ENV=$_FLASK_ENV,ENV_NAME=$_ENV_NAME,IS_PROD=$_IS_PROD'
+      - '--update-secrets'
+      - 'MAIL_SECRET=mailsecret:latest'
+      - '--allow-unauthenticated'
+timeout: 1200s
+
+images:
+  - '$_AR_HOSTNAME/$PROJECT_ID/$_AR_REPO/$_SERVICE_NAME:$COMMIT_SHA'
