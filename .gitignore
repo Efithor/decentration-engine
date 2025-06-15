@@ -1,0 +1,11 @@
+keys/
+.keys/
+__pycache__/
+*.py[cod]
+.ruff_cache
+tests/results/
+.pytest_cache/
+iframe_zone/
+.mypy_cache/
+config/
+data

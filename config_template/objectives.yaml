@@ -1,0 +1,12 @@
+# objectives.yaml – editable at runtime
+# -----------------------------------------------------------------------------
+# This file captures the top-level life objectives that will guide the agent's
+# decision-making and information pruning processes.  Modify values on the fly –
+# the server will hot-reload them (implementation pending).
+# -----------------------------------------------------------------------------
+# Example structure (feel free to change as you like):
+# - Maintain physical and mental well-being
+# - Nurture relationships with friends & family
+# - Ship impactful projects at work
+# - Grow creative pursuits (writing, music)
+# - Reduce digital clutter
