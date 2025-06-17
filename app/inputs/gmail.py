@@ -54,8 +54,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Dict, Optional
-import logging
 import os
+from google.cloud import logging as gcp_logging
 
 # ---------------------------------------------------------------------------
 # Optional Google dependencies – make import optional so the rest of the code
@@ -86,6 +86,16 @@ _DEFAULT_CONFIG_DIR = Path.home() / ".config" / "decentration"
 _DEFAULT_CLIENT_SECRET = _DEFAULT_CONFIG_DIR / "google_credentials.json"
 _DEFAULT_TOKEN_FILE = _DEFAULT_CONFIG_DIR / "gmail_token.json"
 
+# ---------------------------------------------------------------------------
+# Google Cloud Logging setup
+# ---------------------------------------------------------------------------
+_logging_client = gcp_logging.Client()
+_logger_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
+_gcp_logger = _logging_client.logger(_logger_name)
+gcp_logging.log_text = _gcp_logger.log_text  # type: ignore[attr-defined]
+
+# Alias
+logging = gcp_logging
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -108,8 +118,9 @@ def _get_service():  # pragma: no cover – external network calls are not unit-
     """
 
     if Credentials is None or InstalledAppFlow is None or build is None:
-        logging.warning(
+        logging.log_text(
             "Google client libraries not available – Gmail adapter disabled."
+            , severity="WARNING"
         )
         return None  # type: ignore[return-value]
 
@@ -122,7 +133,10 @@ def _get_service():  # pragma: no cover – external network calls are not unit-
         try:
             creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)  # type: ignore[arg-type]
         except Exception as exc:  # pragma: no cover – corrupted token?
-            logging.warning("Failed to load cached Gmail credentials: %s", exc)
+            logging.log_text(
+                f"Failed to load cached Gmail credentials: {exc}",
+                severity="WARNING",
+            )
             creds = None
 
     # Refresh / create credentials when missing or expired.
@@ -133,16 +147,17 @@ def _get_service():  # pragma: no cover – external network calls are not unit-
 
                 creds.refresh(Request())  # type: ignore[arg-type]
             except Exception as exc:  # pragma: no cover
-                logging.warning(
-                    "Failed to refresh Gmail token; falling back to re-auth: %s", exc
+                logging.log_text(
+                    f"Failed to refresh Gmail token; falling back to re-auth: {exc}",
+                    severity="WARNING",
                 )
                 creds = None
 
         if creds is None:
             if not client_secret.exists():
-                logging.error(
+                logging.log_text(
                     "Gmail client secret not found at %s.  Set GMAIL_CLIENT_SECRET env var or place the file manually.",
-                    client_secret,
+                    severity="ERROR",
                 )
                 return None  # type: ignore[return-value]
 
@@ -153,12 +168,18 @@ def _get_service():  # pragma: no cover – external network calls are not unit-
                 with open(token_file, "w", encoding="utf-8") as fp:
                     fp.write(creds.to_json())  # type: ignore[arg-type]
             except Exception as exc:  # pragma: no cover
-                logging.warning("Could not save Gmail token to disk: %s", exc)
+                logging.log_text(
+                    f"Could not save Gmail token to disk: {exc}",
+                    severity="WARNING",
+                )
 
     try:
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)  # type: ignore[arg-type]
     except Exception as exc:  # pragma: no cover
-        logging.error("Failed to build Gmail service: %s", exc)
+        logging.log_text(
+            f"Failed to build Gmail service: {exc}",
+            severity="ERROR",
+        )
         return None  # type: ignore[return-value]
 
     return service
@@ -200,6 +221,7 @@ def _extract_plain_text(payload: dict[str, Any]) -> str:
 def query_emails(
     *,
     since: datetime,
+    categories: Optional[List[str]] = None,
     unread_only: bool = True,
     max_results: int = 100,
 ) -> List[Dict[str, Any]]:
@@ -210,6 +232,12 @@ def query_emails(
     since:
         The lower bound (UTC) timestamp; messages older than this value are
         ignored.
+    categories:
+        Restrict results to the specified Gmail *tabs* / *categories* (same
+        semantics as the web-search box, e.g. ``category:primary``).  When
+        ``None`` (default) the adapter limits the query to *Primary* and
+        *Updates* which are typically the most relevant for user mail.  Pass
+        an empty list (``[]``) to disable category filtering entirely.
     unread_only:
         When ``True`` (default) restricts the query to *is:unread* messages.
     max_results:
@@ -238,6 +266,17 @@ def query_emails(
     q_terms: list[str] = [f"after:{epoch_sec}"]
     if unread_only:
         q_terms.append("is:unread")
+
+    # ---------------------------------------------------------------
+    # Category filtering (Primary & Updates by default)
+    # ---------------------------------------------------------------
+    if categories is None:
+        categories = ["primary", "updates"]
+
+    if categories:
+        cat_expr = " OR ".join(f"category:{c.lower()}" for c in categories)
+        q_terms.append(f"({cat_expr})")
+
     q = " ".join(q_terms)
 
     messages: List[Dict[str, Any]] = []
@@ -257,7 +296,10 @@ def query_emails(
                 .execute()
             )
         except Exception as exc:  # pragma: no cover – network / quota errors
-            logging.error("Gmail API messages.list failed: %s", exc)
+            logging.log_text(
+                f"Gmail API messages.list failed: {exc}",
+                severity="ERROR",
+            )
             break
 
         ids = [m["id"] for m in resp.get("messages", [])]
@@ -275,7 +317,10 @@ def query_emails(
                     .execute()
                 )
             except Exception as exc:  # pragma: no cover
-                logging.warning("Could not fetch Gmail message %s: %s", msg_id, exc)
+                logging.log_text(
+                    f"Could not fetch Gmail message {msg_id}: {exc}",
+                    severity="WARNING",
+                )
                 continue
 
             payload = msg.get("payload", {})

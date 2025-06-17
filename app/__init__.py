@@ -22,42 +22,42 @@ from flask import Flask, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-try:
-    from google.cloud import logging as gcloud_logging  # type: ignore
-except ImportError:  # pragma: no cover – GCP library might be absent locally
-    gcloud_logging = None  # type: ignore
-
 # ---------------------------------------------------------------------------
 # Environment & logging setup (executed at import time)
 # ---------------------------------------------------------------------------
 
+# NOTE:
+# The Google Cloud Logger instance is created centrally in ``main_driver.py``
+# and passed down to :pyfunc:`create_app` during initialisation.  This module
+# therefore **must not** instantiate its own Cloud Logging client.  Instead we
+# provide a lightweight "_log" helper that delegates to the supplied logger
+# when available or falls back to the stdlib ``logging`` package otherwise.
+
+# Keep LOCAL_CREDS convenience shim for local development (no auth dance).
 LOCAL_CREDS: str | None = os.getenv("LOCAL_CREDS")
 if LOCAL_CREDS is not None:
-    # Allow local development without gcloud auth dance
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", LOCAL_CREDS)
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "decentration-engine")
 
-# Configure a project-wide logger.  Prefer Google Cloud Logging where available
-# for seamless integration with Cloud Run / GKE, but fall back to stdlib logging
-# so that the code remains portable.
-if gcloud_logging is not None:
-    _logging_client = gcloud_logging.Client()
-    _log_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
-    logger = _logging_client.logger(_log_name)
+# ---------------------------------------------------------------------------
+# Internal logging facade – resolved at *runtime* in create_app.
+# ---------------------------------------------------------------------------
 
-    # Make sure Python warnings / logging end up in Cloud Logging, too.
-    gcloud_logging.Client().setup_logging(log_level=logging.INFO)
+# Forward declaration so that type-checkers are happy.
+from typing import Callable  # noqa: E402  – runtime import order is fine here
 
-    # Helper alias to align with the template API (logger.log_text).
-    _log = logger.log_text  # type: ignore[attr-defined]
-else:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s – %(message)s")
-    logger = logging.getLogger("decentration-engine")
+_log: Callable[[str], None]
 
-    def _log(message: str, *, severity: str = "INFO") -> None:  # noqa: D401 – simple helper
-        """Mimic the google-cloud logger API when unavailable locally."""
-        level = severity.upper()
-        getattr(logger, level.lower(), logger.info)(message)
+
+def _default_log(message: str, *, severity: str = "INFO") -> None:  # noqa: D401
+    """Fallback logger that writes to the stdlib root logger."""
+    level = severity.upper()
+    getattr(logging, level.lower(), logging.info)(message)
+
+
+# Initialise the helper with the default implementation; it will be *patched*
+# in ``create_app`` when a Google Cloud logger is supplied by the caller.
+_log = _default_log
 
 # Log module import (occurs once per worker)
 _log("Flask application factory module imported", severity="INFO")
@@ -83,6 +83,29 @@ def create_app(*_: Any, **__: Any) -> Flask:  # type: ignore[override]
     The function keeps the public signature flexible (\*args, \*\*kwargs) so that future
     extensions – for example, dynamic config injection – do not break callers.
     """
+
+    # Optional positional / keyword arguments can include a Google Cloud
+    # ``logger`` object. Accept it via \*args / \*\*kwargs to avoid a breaking
+    # change for existing import paths while still enabling dependency
+    # injection from ``main_driver``.
+
+    gcp_logger = None
+    if _ and hasattr(_[0], "log_text"):
+        # Assume first positional arg is the logger.
+        gcp_logger = _[0]
+    elif "logger" in __ and hasattr(__["logger"], "log_text"):
+        gcp_logger = __["logger"]
+
+    # Patch the module-level _log helper *once* so that downstream importers
+    # (e.g. blueprints) pick up the correct implementation.
+    global _log  # noqa: PLW0603 – intentional global state
+    if gcp_logger is not None:
+        _log = lambda msg, *, severity="INFO": gcp_logger.log_text(  # type: ignore  # noqa: E731
+            msg, severity=severity.upper()
+        )
+    else:
+        # Keep default stdlib logger.
+        _log = _default_log
 
     # ---------------------------------------------------------------------
     # Initialise base Flask app
