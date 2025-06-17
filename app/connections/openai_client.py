@@ -12,7 +12,7 @@ Features to add
 * Automatic exponential backoff on 429 / 5xx responses.
 * Optional in-memory or Redis cache keyed on prompt hash.
 * Streaming support.
-* Model selection via environment variable (`OPENAI_MODEL`, default "gpt-4o").
+* Model selection via environment variable (`OPENAI_MODEL`, default "gpt-4o-mini-2024-07-18").
 """
 
 # TODO: Implement OpenAI client wrapper.
@@ -48,7 +48,7 @@ __all__ = [
 # Configuration & in-memory cache
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+_DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini-2024-07-18")
 _MAX_CACHE_SIZE: int = 256  # naive FIFO cache size
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -164,7 +164,7 @@ def chat_completion(
         List of chat messages following the OpenAI schema.
     model:
         Override the model name. Falls back to the ``OPENAI_MODEL`` env var or
-        ``"gpt-4o"`` when omitted.
+        ``"gpt-4o-mini-2024-07-18"`` when omitted.
     stream:
         If ``True``, the call is forwarded with streaming enabled and the raw
         iterator is returned. Caching is disabled in streaming mode.
