@@ -22,12 +22,24 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 import json
-import logging
+import os
+from google.cloud import logging as gcp_logging
 
 import click
 
 # Local verbs
 from app.verbs import summarize_email, summarize_tweets
+
+# ---------------------------------------------------------------------------
+# Google Cloud Logging setup
+# ---------------------------------------------------------------------------
+_logging_client = gcp_logging.Client()
+_logger_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
+_gcp_logger = _logging_client.logger(_logger_name)
+gcp_logging.log_text = _gcp_logger.log_text  # type: ignore[attr-defined]
+
+# Make the module accessible via the familiar name.
+logging = gcp_logging
 
 # ---------------------------------------------------------------------------
 # HTTP helper (remote execution)
@@ -51,7 +63,10 @@ def _post_json(url: str, payload: Dict[str, Any]) -> Any:  # pragma: no cover
             "`pip install requests` or omit --api-url to run locally."
         ) from exc
 
-    logging.debug("POST %s – payload size: %d bytes", url, len(json.dumps(payload)))
+    logging.log_text(
+        f"POST {url} – payload size: {len(json.dumps(payload))} bytes",
+        severity="DEBUG",
+    )
     try:
         response = requests.post(url, json=payload, timeout=30)
         response.raise_for_status()

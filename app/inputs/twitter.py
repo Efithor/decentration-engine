@@ -47,8 +47,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import logging
 import os
+from google.cloud import logging as gcp_logging
 
 # ---------------------------------------------------------------------------
 # Optional Tweepy dependency (Twitter/X API v2).
@@ -68,6 +68,16 @@ __all__ = [
 _DEFAULT_CONFIG_DIR = Path.home() / ".config" / "decentration"
 _DEFAULT_TOKEN_FILE = _DEFAULT_CONFIG_DIR / "x_bearer_token.txt"
 
+# ---------------------------------------------------------------------------
+# Google Cloud Logging setup
+# ---------------------------------------------------------------------------
+_logging_client = gcp_logging.Client()
+_logger_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
+_gcp_logger = _logging_client.logger(_logger_name)
+gcp_logging.log_text = _gcp_logger.log_text  # type: ignore[attr-defined]
+
+# Alias
+logging = gcp_logging
 
 def _resolve_credential() -> Optional[str]:
     """Return Bearer Token string or ``None`` when unavailable."""
@@ -90,21 +100,27 @@ def _resolve_credential() -> Optional[str]:
 def _get_client():  # pragma: no cover – external network calls are not unit-tested
     """Return an authorised *tweepy.Client* instance (v2)."""
     if tweepy is None:
-        logging.warning("Tweepy not available – Twitter adapter disabled.")
+        logging.log_text(
+            "Tweepy not available – Twitter adapter disabled.",
+            severity="WARNING",
+        )
         return None  # type: ignore[return-value]
 
     bearer = _resolve_credential()
     if not bearer:
-        logging.warning(
-            "X API Bearer Token missing – set X_BEARER_TOKEN env var or place token in %s",
-            _DEFAULT_TOKEN_FILE,
+        logging.log_text(
+            f"X API Bearer Token missing – set X_BEARER_TOKEN env var or place token in {_DEFAULT_TOKEN_FILE}",
+            severity="WARNING",
         )
         return None  # type: ignore[return-value]
 
     try:
         client = tweepy.Client(bearer_token=bearer, wait_on_rate_limit=True)
     except Exception as exc:  # pragma: no cover – invalid token / network issue
-        logging.error("Failed to create Tweepy client: %s", exc)
+        logging.log_text(
+            f"Failed to create Tweepy client: {exc}",
+            severity="ERROR",
+        )
         return None  # type: ignore[return-value]
 
     return client
@@ -120,7 +136,10 @@ def _lookup_user_id(username: str) -> Optional[int]:
     try:
         resp = client.get_user(username=username)
     except Exception as exc:  # pragma: no cover – network / auth errors
-        logging.warning("Could not resolve X user '%s': %s", username, exc)
+        logging.log_text(
+            f"Could not resolve X user '{username}': {exc}",
+            severity="WARNING",
+        )
         return None
 
     return resp.data.id if resp and resp.data else None  # type: ignore[return-value]
@@ -181,8 +200,9 @@ def query_tweets(
                 max_results=100,  # API limit per request
             )
         except Exception as exc:  # pragma: no cover
-            logging.warning(
-                "Could not initiate tweet pagination for %s: %s", username, exc
+            logging.log_text(
+                f"Could not initiate tweet pagination for {username}: {exc}",
+                severity="WARNING",
             )
             continue
 

@@ -12,7 +12,7 @@ Features to add
 * Automatic exponential backoff on 429 / 5xx responses.
 * Optional in-memory or Redis cache keyed on prompt hash.
 * Streaming support.
-* Model selection via environment variable (`OPENAI_MODEL`, default "gpt-4o").
+* Model selection via environment variable (`OPENAI_MODEL`, default "gpt-4o-mini-2024-07-18").
 """
 
 # TODO: Implement OpenAI client wrapper.
@@ -26,7 +26,7 @@ import os
 import time
 import json
 import hashlib
-import logging
+from google.cloud import logging as gcp_logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 # Third-party dependency – ensure it is installed in your environment.
@@ -38,6 +38,8 @@ except ImportError as exc:  # pragma: no cover
         "but is not installed. Install it via `pip install openai`."
     ) from exc
 
+from app.helper_functions import get_secret_value  # Local import to avoid cycles
+
 __all__ = [
     "chat_completion",
 ]
@@ -46,10 +48,54 @@ __all__ = [
 # Configuration & in-memory cache
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+_DEFAULT_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini-2024-07-18")
 _MAX_CACHE_SIZE: int = 256  # naive FIFO cache size
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
+# ---------------------------------------------------------------------------
+# Google Cloud Logging setup
+# ---------------------------------------------------------------------------
+_logging_client = gcp_logging.Client()
+_logger_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
+_gcp_logger = _logging_client.logger(_logger_name)
+gcp_logging.log_text = _gcp_logger.log_text  # type: ignore[attr-defined]
+
+# Re-export for use below
+logging = gcp_logging
+
+# ---------------------------------------------------------------------------
+# OpenAI API key resolution (env var > Secret Manager > error)
+# ---------------------------------------------------------------------------
+# The OpenAI SDK looks for an ``OPENAI_API_KEY`` environment variable or the
+# ``openai.api_key`` attribute. We first honor any key already present in the
+# environment so local overrides (e.g., `.env` files) work as expected. When
+# the variable is missing, we fall back to Google Secret Manager via the
+# helper ``get_secret_value`` utility.
+
+# Attempt 1 – environment variable implicitly handled by the OpenAI SDK.
+_OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
+
+# Attempt 2 – fetch from Secret Manager when env var is absent.
+if _OPENAI_API_KEY is None:  # pragma: no cover – requires GCP runtime
+    try:
+        _project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        _secret_id = "decentration-engine-key"
+        _OPENAI_API_KEY = get_secret_value(_project_id, _secret_id)
+        logging.log_text(
+            "Loaded OpenAI API key from Secret Manager.", severity="INFO"
+        )
+    except Exception as exc:  # pragma: no cover – network / IAM failures
+        logging.log_text(
+            f"Failed to retrieve OpenAI API key from Secret Manager: {exc}",
+            severity="ERROR",
+        )
+        _OPENAI_API_KEY = None
+
+# Propagate the key to the OpenAI SDK if we have one.
+if _OPENAI_API_KEY:
+    # New SDKs expose a global config object where ``api_key`` is respected by
+    # the default client. For <1.x we assign the module attribute directly.
+    openai.api_key = _OPENAI_API_KEY
 
 def _hash_messages(messages: List[dict]) -> str:
     """Return a stable SHA-256 hash for a list of chat messages."""
@@ -83,14 +129,14 @@ def _retry(
         ) as exc:  # pragma: no cover – best-effort mapping across SDK versions
             attempt += 1
             if attempt > max_retries:
-                logging.exception("OpenAI request failed after %s attempts", attempt)
+                logging.log_text(
+                    f"OpenAI request failed after {attempt} attempts",
+                    severity="ERROR",
+                )
                 raise
-            logging.warning(
-                "OpenAI request failed (%s). Retrying in %.1fs (attempt %s/%s)…",
-                exc,
-                delay,
-                attempt,
-                max_retries,
+            logging.log_text(
+                f"OpenAI request failed ({exc}). Retrying in {delay:.1f}s (attempt {attempt}/{max_retries})…",
+                severity="WARNING",
             )
             time.sleep(delay)
             delay *= backoff_factor
@@ -118,7 +164,7 @@ def chat_completion(
         List of chat messages following the OpenAI schema.
     model:
         Override the model name. Falls back to the ``OPENAI_MODEL`` env var or
-        ``"gpt-4o"`` when omitted.
+        ``"gpt-4o-mini-2024-07-18"`` when omitted.
     stream:
         If ``True``, the call is forwarded with streaming enabled and the raw
         iterator is returned. Caching is disabled in streaming mode.

@@ -2,18 +2,53 @@ from app import create_app
 import os
 import sys
 from google.cloud import logging
+import logging as pylogging
 
 LOCAL_CREDS = os.getenv("LOCAL_CREDS")
 
 if LOCAL_CREDS is not None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = LOCAL_CREDS
-    os.environ["GOOGLE_CLOUD_PROJECT"] = "semianalysis-core"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 # Set up logging
 ENV_NAME = os.getenv("ENV_NAME", "dev")
-LOG_NAME = f"{ENV_NAME}_business_helper"
+LOG_NAME = f"{ENV_NAME}_decentration_engine"
 logging_client = logging.Client()
 logger = logging_client.logger(LOG_NAME)
+
+# ---------------------------------------------------------------------------
+# Google Cloud Logging – centralised configuration
+# ---------------------------------------------------------------------------
+
+class CloudLoggingHandler(pylogging.Handler):
+    """Stdlib logging handler that forwards records to Google Cloud Logging."""
+
+    def __init__(self, gcp_logger):  # noqa: D401 – simple pass-through
+        super().__init__()
+        self._gcp_logger = gcp_logger
+
+    def emit(self, record: pylogging.LogRecord) -> None:  # noqa: D401
+        try:
+            msg = self.format(record)
+            severity = record.levelname.upper()
+            self._gcp_logger.log_text(msg, severity=severity)
+        except Exception:  # pragma: no cover – never let logging crash the app
+            # Fallback to default error handling (stderr).
+            super().handleError(record)
+
+# ---------------------------------------------------------------------
+# Attach Cloud Logging handler to *root* logger so that modules using the
+# stdlib ``logging`` API are transparently forwarded to GCP.
+# ---------------------------------------------------------------------
+
+_handler = CloudLoggingHandler(logger)
+_handler.setFormatter(
+    pylogging.Formatter("%(asctime)s %(levelname)s %(name)s – %(message)s")
+)
+
+root_logger = pylogging.getLogger()
+root_logger.setLevel(pylogging.INFO)
+root_logger.addHandler(_handler)
 
 # Log application startup
 logger.log_text("Application starting up", severity="INFO")
@@ -23,7 +58,8 @@ logger.log_text(f"Server starting in {FLASK_ENV} mode", severity="INFO")
 
 PORT = int(os.getenv("PORT", 8080))
 
-app = create_app()
+# Pass the Google Cloud logger to the Flask factory
+app = create_app(logger)
 
 
 def run_server() -> None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-import logging
 from pathlib import Path
+import os
+from google.cloud import logging as gcp_logging
 
 """verbs.py – Action primitives for the Decentration Engine
 
@@ -43,6 +44,28 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
+# Google Cloud Logging setup
+# ---------------------------------------------------------------------------
+# Provide a module-level logger that mirrors the behaviour of the
+# stdlib ``logging`` calls, but routes everything to Google Cloud
+# Logging via ``log_text``.  We expose the convenience attribute
+# ``gcp_logging.log_text`` so call-sites can use the pattern
+# ``logging.log_text(msg, severity="WARNING")`` as requested.
+
+_logging_client = gcp_logging.Client()
+_logger_name = f"{os.getenv('ENV_NAME', 'dev')}_decentration_engine"
+_gcp_logger = _logging_client.logger(_logger_name)
+
+# Attach the helper directly onto the imported module so that downstream
+# code can call ``logging.log_text`` without needing explicit access to
+# the instantiated logger.
+gcp_logging.log_text = _gcp_logger.log_text  # type: ignore[attr-defined]
+
+# Re-export under the well-known name expected by existing source files.
+logging = gcp_logging
+
+
+# ---------------------------------------------------------------------------
 # Helper utilities (internal)
 # ---------------------------------------------------------------------------
 
@@ -59,17 +82,21 @@ def _retrieve_emails(
     """
 
     if gmail is None or not hasattr(gmail, "query_emails"):
-        logging.warning(
+        logging.log_text(
             "Gmail adapter is not ready – returning an empty result set.  "
             "Implement `query_emails` in `app.inputs.gmail` to enable the "
-            "email summarisation verb."
+            "email summarisation verb.",
+            severity="WARNING",
         )
         return []
 
     try:
         return gmail.query_emails(since=since, unread_only=unread_only)  # type: ignore[attr-defined]
     except Exception as exc:  # pragma: no cover – defensive guardrail
-        logging.exception("Failed to fetch e-mails via Gmail adapter: %s", exc)
+        logging.log_text(
+            f"Failed to fetch e-mails via Gmail adapter: {exc}",
+            severity="ERROR",
+        )
         return []
 
 
@@ -87,11 +114,12 @@ def _retrieve_tweets(
     """
 
     if twitter is None or not hasattr(twitter, "query_tweets"):
-        logging.warning(
+        logging.log_text(
             "Twitter adapter is not ready – returning an empty result set.  "
             "Implement `query_tweets` in `app.inputs.twitter` and ensure the "
             "Tweepy dependency & credentials are configured to enable the "
-            "tweet summarisation verb."
+            "tweet summarisation verb.",
+            severity="WARNING",
         )
         return []
 
@@ -100,7 +128,10 @@ def _retrieve_tweets(
             accounts=accounts, since=since, max_results=max_results
         )  # type: ignore[attr-defined]
     except Exception as exc:  # pragma: no cover – defensive guardrail
-        logging.exception("Failed to fetch tweets via Twitter adapter: %s", exc)
+        logging.log_text(
+            f"Failed to fetch tweets via Twitter adapter: {exc}",
+            severity="ERROR",
+        )
         return []
 
 
@@ -131,13 +162,17 @@ def _summarise_with_llm(
 
             client = import_module(f"app.connections.{llm_connection}")
         except ModuleNotFoundError as exc:  # pragma: no cover
-            logging.error("LLM connection '%s' not found: %s", llm_connection, exc)
+            logging.log_text(
+                f"LLM connection '{llm_connection}' not found: {exc}",
+                severity="ERROR",
+            )
             client = openai_client  # graceful fallback
 
     if client is None or not hasattr(client, "chat_completion"):
-        logging.error(
+        logging.log_text(
             "LLM client does not expose `chat_completion`; returning a "
-            "placeholder summary."
+            "placeholder summary.",
+            severity="ERROR",
         )
         return "(LLM back-end not configured – summary unavailable)"
 
@@ -160,12 +195,18 @@ def _summarise_with_llm(
                         yaml_text = fp.read().strip()
                         parts.append(f"### {section_title}\n{yaml_text}")
                 except Exception as exc:
-                    logging.warning("Failed to read config file %s: %s", fname, exc)
+                    logging.log_text(
+                        f"Failed to read config file {fname}: {exc}",
+                        severity="WARNING",
+                    )
         if parts:
             config_context = "\n\n".join(parts)
     except Exception as exc:
         # Defensive: never let prompt construction crash the verb.
-        logging.exception("Unable to assemble config context for LLM prompt: %s", exc)
+        logging.log_text(
+            f"Unable to assemble config context for LLM prompt: {exc}",
+            severity="ERROR",
+        )
         config_context = ""
 
     # Assemble messages according to the OpenAI /chat/completions schema.
@@ -196,7 +237,10 @@ def _summarise_with_llm(
     try:
         response: str | dict = client.chat_completion(messages=messages)  # type: ignore[arg-type]
     except Exception as exc:  # pragma: no cover – keep demo resilient
-        logging.exception("LLM call failed: %s", exc)
+        logging.log_text(
+            f"LLM call failed: {exc}",
+            severity="ERROR",
+        )
         return "(LLM call failed – see logs for details)"
 
     # The exact response shape depends on the client wrapper.  We handle a few
@@ -208,7 +252,10 @@ def _summarise_with_llm(
         try:
             return response["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
-            logging.warning("Unexpected LLM response schema; using str() cast.")
+            logging.log_text(
+                "Unexpected LLM response schema; using str() cast.",
+                severity="WARNING",
+            )
             return str(response)
 
     return str(response)
