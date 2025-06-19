@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -8,11 +8,15 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Clean up to reduce image size
+RUN apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy dependency declaration files
-COPY requirements.in requirements.txt /app/
+# Install any needed packages specified in requirements.txt
+COPY requirements.txt /app/
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
@@ -21,5 +25,5 @@ RUN uv pip install --system -r requirements.txt
 # Copy the current directory contents into the container at /app
 COPY . /app
 
-# Execute with gunicorn specifying the app object
-ENTRYPOINT ["python", "-m", "main_driver"]
+# Execute Driver
+CMD ["python", "./main_driver.py"]

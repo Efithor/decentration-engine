@@ -10,7 +10,7 @@ LOCAL_CREDS = os.getenv("LOCAL_CREDS")
 
 if LOCAL_CREDS is not None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = LOCAL_CREDS
-    os.environ["GOOGLE_CLOUD_PROJECT"] = "semianalysis-core"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ def get_secret_value(project_id, secret_id, version_id="latest"):
 
 SERVICE_ACCOUNT_NAME = os.getenv("API_DB_USER")
 SERVICE_ACCOUNT_SECRET = get_secret_value(
-    "EfithorZone", "decentration-engine-app-password"
+    os.getenv("GOOGLE_CLOUD_PROJECT"), "decentration-engine-app-password"
 )
 
 DB_CONNECTION_STRING = "postgresql+pg8000://"

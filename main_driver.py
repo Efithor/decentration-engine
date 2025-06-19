@@ -8,7 +8,7 @@ LOCAL_CREDS = os.getenv("LOCAL_CREDS")
 
 if LOCAL_CREDS is not None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = LOCAL_CREDS
-    os.environ["GOOGLE_CLOUD_PROJECT"] = "semianalysis-core"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 # Set up logging
 ENV_NAME = os.getenv("ENV_NAME", "dev")

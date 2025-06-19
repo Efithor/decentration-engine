@@ -78,8 +78,8 @@ _OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 # Attempt 2 – fetch from Secret Manager when env var is absent.
 if _OPENAI_API_KEY is None:  # pragma: no cover – requires GCP runtime
     try:
-        _project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "EfithorZone")
-        _secret_id = os.getenv("OPENAI_SECRET_ID", "decentration-engine-key")
+        _project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        _secret_id = "decentration-engine-key"
         _OPENAI_API_KEY = get_secret_value(_project_id, _secret_id)
         logging.log_text(
             "Loaded OpenAI API key from Secret Manager.", severity="INFO"

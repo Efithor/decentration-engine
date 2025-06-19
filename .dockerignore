@@ -6,5 +6,4 @@ __pycache__/
 .git
 .env
 .venv
-.keys
 .ruff_cache

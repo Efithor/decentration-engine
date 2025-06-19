@@ -56,6 +56,10 @@ from pathlib import Path
 from typing import Any, List, Dict, Optional
 import os
 from google.cloud import logging as gcp_logging
+import imaplib
+import email
+from email.header import decode_header
+from app.helper_functions import get_secret_value
 
 # ---------------------------------------------------------------------------
 # Optional Google dependencies – make import optional so the rest of the code
@@ -214,6 +218,108 @@ def _extract_plain_text(payload: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# IMAP helpers (new – prefer simple app-password auth over OAuth)
+# ---------------------------------------------------------------------------
+
+
+def _get_imap_client() -> imaplib.IMAP4_SSL | None:
+    """Return an authenticated IMAP client or ``None`` on failure.
+
+    The function attempts the following credential resolution strategy:
+
+    1. ``GMAIL_APP_PASSWORD`` environment variable (highest precedence).
+    2. Secret Manager – the secret name defaults to ``gmail-app-password`` but
+       can be overridden via ``GMAIL_APP_PASSWORD_SECRET_ID``.
+       Requires ``GOOGLE_CLOUD_PROJECT`` to be set for the current runtime.
+
+    The Gmail username (e-mail address) **must** be supplied via the
+    ``GMAIL_USERNAME`` environment variable.
+    """
+
+    user = os.getenv("GMAIL_USERNAME")
+    if not user:
+        logging.log_text(
+            "GMAIL_USERNAME env var is missing – cannot authenticate to Gmail.",
+            severity="ERROR",
+        )
+        return None
+
+    # Resolve the app password – environment variable wins over Secret Manager.
+    app_password = os.getenv("GMAIL_APP_PASSWORD")
+
+    if not app_password:
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        secret_id = os.getenv("GMAIL_APP_PASSWORD_SECRET_ID", "gmail-app-password")
+
+        if not project_id:
+            logging.log_text(
+                "GOOGLE_CLOUD_PROJECT not set and no GMAIL_APP_PASSWORD env – cannot fetch Gmail credentials.",
+                severity="ERROR",
+            )
+            return None
+
+        try:
+            app_password = get_secret_value(project_id, secret_id)
+        except Exception as exc:  # pragma: no cover – secret retrieval failed
+            logging.log_text(
+                f"Failed to retrieve Gmail app password from Secret Manager: {exc}",
+                severity="ERROR",
+            )
+            return None
+
+    try:
+        client = imaplib.IMAP4_SSL("imap.gmail.com")
+        client.login(user, app_password)
+        return client  # type: ignore[return-value]
+    except Exception as exc:  # pragma: no cover – auth/network failure
+        logging.log_text(f"IMAP login failed: {exc}", severity="ERROR")
+        return None
+
+
+def _decode_mime_words(header_val: str) -> str:
+    """Decode MIME-encoded words (e.g. =?utf-8?q?hello?=)."""
+
+    decoded_fragments: list[str] = []
+    for frag, encoding in decode_header(header_val):
+        if isinstance(frag, bytes):
+            try:
+                decoded_fragments.append(frag.decode(encoding or "utf-8", errors="replace"))
+            except Exception:  # pragma: no cover
+                decoded_fragments.append(frag.decode("utf-8", errors="replace"))
+        else:
+            decoded_fragments.append(frag)
+    return "".join(decoded_fragments)
+
+
+def _extract_plain_text_email(msg: email.message.Message) -> str:
+    """Return the first text/plain part from a MIME message (best effort)."""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disp = str(part.get("Content-Disposition", ""))
+            if content_type == "text/plain" and "attachment" not in disp:
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+                    charset = part.get_content_charset() or "utf-8"
+                    return payload.decode(charset, errors="replace")
+                except Exception:
+                    continue
+    else:
+        if msg.get_content_type() == "text/plain":
+            payload = msg.get_payload(decode=True)
+            if payload is not None:
+                charset = msg.get_content_charset() or "utf-8"
+                try:
+                    return payload.decode(charset, errors="replace")
+                except Exception:
+                    pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -257,19 +363,21 @@ def query_emails(
     if since.tzinfo is None:
         raise ValueError("`since` datetime must be timezone-aware (UTC)")
 
-    service = _get_service()
-    if service is None:  # dependency / credential issue – already logged
+    client = _get_imap_client()
+    if client is None:
+        # Errors already logged – keep outer API resilient.
         return []
 
-    # Compose Gmail query string.
-    epoch_sec = int(since.timestamp())
-    q_terms: list[str] = [f"after:{epoch_sec}"]
+    messages: List[Dict[str, Any]] = []
+
+    # Gmail understands its standard search syntax via the X-GM-RAW extension.
+    date_str = since.strftime("%Y/%m/%d")  # e.g. 2025/06/18
+
+    q_terms: list[str] = [f"after:{date_str}"]
     if unread_only:
         q_terms.append("is:unread")
 
-    # ---------------------------------------------------------------
-    # Category filtering (Primary & Updates by default)
-    # ---------------------------------------------------------------
+    # Category filtering – best-effort by adding the same raw query clauses.
     if categories is None:
         categories = ["primary", "updates"]
 
@@ -277,71 +385,65 @@ def query_emails(
         cat_expr = " OR ".join(f"category:{c.lower()}" for c in categories)
         q_terms.append(f"({cat_expr})")
 
-    q = " ".join(q_terms)
+    raw_query = " ".join(q_terms)
 
-    messages: List[Dict[str, Any]] = []
-    page_token: Optional[str] = None
+    try:
+        client.select("inbox")  # readonly is fine – Gmail ignores the flag.
+        status, data = client.uid("SEARCH", "X-GM-RAW", f'"{raw_query}"')
+        if status != "OK":
+            logging.log_text(f"IMAP search failed: {status}", severity="ERROR")
+            return []
 
-    while True:
-        try:
-            resp = (
-                service.users()
-                .messages()
-                .list(
-                    userId="me",
-                    q=q,
-                    pageToken=page_token,
-                    maxResults=min(500, max_results - len(messages)),  # Gmail max
-                )
-                .execute()
-            )
-        except Exception as exc:  # pragma: no cover – network / quota errors
-            logging.log_text(
-                f"Gmail API messages.list failed: {exc}",
-                severity="ERROR",
-            )
-            break
-
-        ids = [m["id"] for m in resp.get("messages", [])]
-        page_token = resp.get("nextPageToken")
-
-        # Fetch message details in batches (sequentially to keep things simple).
-        for msg_id in ids:
+        uid_list = data[0].split() if data and data[0] else []
+        # Process newest first for parity with REST-based implementation.
+        for uid in reversed(uid_list):
             if len(messages) >= max_results:
                 break
-            try:
-                msg = (
-                    service.users()
-                    .messages()
-                    .get(userId="me", id=msg_id, format="full")
-                    .execute()
-                )
-            except Exception as exc:  # pragma: no cover
-                logging.log_text(
-                    f"Could not fetch Gmail message {msg_id}: {exc}",
-                    severity="WARNING",
-                )
+
+            status, msg_data = client.uid("FETCH", uid, "(RFC822)")
+            if status != "OK" or not msg_data or len(msg_data) < 1:
                 continue
 
-            payload = msg.get("payload", {})
-            headers = payload.get("headers", [])
-            snippet = msg.get("snippet", "")
-            body_txt = _extract_plain_text(payload)
+            raw_email = msg_data[0][1]
+            try:
+                msg = email.message_from_bytes(raw_email)
+            except Exception:
+                continue  # skip malformed messages
+
+            # Header helpers.
+            subject = _decode_mime_words(msg.get("Subject", ""))
+            mail_from = _decode_mime_words(msg.get("From", ""))
+            mail_to = _decode_mime_words(msg.get("To", ""))
+
+            body_txt = _extract_plain_text_email(msg)
+            snippet = (body_txt.strip().replace("\n", " ")[:120]) if body_txt else ""
+
+            # Parse internal date.
+            date_hdr = msg.get("Date")
+            try:
+                from email.utils import parsedate_to_datetime
+
+                dt_obj = parsedate_to_datetime(date_hdr) if date_hdr else None
+                ts = dt_obj.timestamp() if dt_obj else 0.0
+            except Exception:
+                ts = 0.0
 
             messages.append(
                 {
-                    "id": msg_id,
-                    "thread_id": msg.get("threadId"),
-                    "timestamp": int(msg.get("internalDate", 0)) / 1000.0,
-                    "subject": _get_header(headers, "Subject"),
-                    "from": _get_header(headers, "From"),
-                    "to": _get_header(headers, "To"),
+                    "id": uid.decode() if isinstance(uid, bytes) else str(uid),
+                    "thread_id": None,
+                    "timestamp": ts,
+                    "subject": subject,
+                    "from": mail_from,
+                    "to": mail_to,
                     "snippet": snippet,
                     "body": body_txt,
                 }
             )
-
-        if page_token is None or len(messages) >= max_results:
-            break
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 
     return messages
