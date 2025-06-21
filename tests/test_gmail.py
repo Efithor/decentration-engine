@@ -148,9 +148,8 @@ class FakeIMAPClient:
 
         if command == "SEARCH":
             # SEARCH is invoked as: client.uid("SEARCH", "X-GM-RAW", f'"{raw_query}"')
-            if len(args) >= 3:
-                # Third arg is the quoted raw query
-                self.raw_search_query = args[2].strip("\"")  # remove surrounding quotes
+            if args:
+                self.raw_search_query = args[-1].strip("\"")  # remove surrounding quotes
             # Return all UIDs separated by spaces, newest UID *last* (Gmail semantics)
             uid_blob = b" ".join(self._uid_to_msg.keys())
             return "OK", [uid_blob]
